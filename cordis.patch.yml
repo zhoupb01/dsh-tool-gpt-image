@@ -1,0 +1,19 @@
+# Bundle patch: inserts the image-generation tool row.
+#
+# These are GENERIC defaults so the bundle works for any user out of the box.
+# Point it at your own endpoint from the *profile* patch instead of editing this
+# file — override the row by id:
+#
+#   - id: tool-gpt-image
+#     config:
+#       baseURL: https://your-relay.example/v1
+#       apiKeyEnv: YOUR_RELAY_API_KEY
+#       defaultModel: gpt-image-2
+#
+- insert:
+    - id: tool-gpt-image
+      name: 'dsh-tool-gpt-image'
+      config:
+        baseURL: https://api.openai.com/v1
+        apiKeyEnv: OPENAI_API_KEY
+        defaultModel: gpt-image-1

@@ -1,0 +1,41 @@
+{
+  "name": "dsh-tool-gpt-image",
+  "version": "0.1.0",
+  "description": "Image generation tool for DeepSeek Harness: calls an OpenAI-compatible /v1/images/generations endpoint and returns real image blocks.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "image-generation",
+    "gpt-image",
+    "openai"
+  ],
+  "author": "zhoupb",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhoupb01/dsh-tool-gpt-image.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zhoupb01/dsh-tool-gpt-image/issues"
+  },
+  "homepage": "https://github.com/zhoupb01/dsh-tool-gpt-image#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
