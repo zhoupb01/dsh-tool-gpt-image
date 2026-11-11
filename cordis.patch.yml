@@ -1,19 +1,16 @@
 # Bundle patch: inserts the image-generation tool row.
 #
-# These are GENERIC defaults so the bundle works for any user out of the box.
-# Point it at your own endpoint from the *profile* patch instead of editing this
-# file — override the row by id:
+# No configuration is required. At load — and once more on the first call if the
+# composition was still settling — the tool reads the model providers the user
+# already configured in Settings, picks the one that advertises an image model,
+# and reuses its endpoint (`baseURL`), credential reference (`apiKeyEnv`), and key.
 #
-#   - id: tool-gpt-image
-#     config:
-#       baseURL: https://your-relay.example/v1
-#       apiKeyEnv: YOUR_RELAY_API_KEY
-#       defaultModel: gpt-image-2
-#
+# Optional fields, for operators only:
+#   outputDir          directory, relative to the session workspace (default: images)
+#   timeoutMs          per-request budget in ms (default: 300000)
+#   imageModelPatterns extra globs that mark a model id as an image model
 - insert:
     - id: tool-gpt-image
       name: 'dsh-tool-gpt-image'
       config:
-        baseURL: https://api.openai.com/v1
-        apiKeyEnv: OPENAI_API_KEY
-        defaultModel: gpt-image-1
+        outputDir: images

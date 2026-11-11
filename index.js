@@ -25,6 +25,15 @@ const DEFAULT_MODEL = 'gpt-image-1'
 const DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'
 const DEFAULT_TIMEOUT_MS = 300_000
 
+/** Protocols that serve the OpenAI-shaped `/images/*` endpoints this plugin calls. */
+const SUPPORTED_PROTOCOLS = new Set(['openai-completions', 'openai-responses'])
+
+/** Model-id globs that mark a configured model as an image model. */
+const IMAGE_MODEL_PATTERNS = ['gpt-image*', 'dall-e*', 'imagen*', 'flux*', 'seedream*', 'qwen-image*']
+
+/** The preferred default when the user's provider offers several image models. */
+const PREFERRED_MODEL = 'gpt-image-2'
+
 const OUTPUT_FORMATS = {
   png: 'image/png',
   jpeg: 'image/jpeg',
@@ -81,7 +90,7 @@ const OUTPUT_SCHEMA = {
 const COMMON_PARAMETERS = {
   model: {
     type: 'string',
-    description: 'Image model id. Defaults to the deployment default model.',
+    description: 'Image model id. Defaults to the image model discovered on the provider the user already configured; pass it only to override that choice.',
   },
   size: {
     type: 'string',
@@ -156,23 +165,302 @@ function timestamp() {
 }
 
 /**
- * Resolve the API key from the harness credential store, then the process environment.
+ * Resolve one credential reference through the harness credential store, then the
+ * process environment.
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {string} keyName
+ * @param {string} ref
  * @returns {Promise<string | undefined>}
  */
-async function resolveApiKey(ctx, keyName) {
+async function resolveCredential(ctx, ref) {
   const credentials = ctx.get('credentials')
-  if (credentials !== undefined) {
+  if (credentials !== undefined && typeof credentials.resolve === 'function') {
     try {
-      const hit = await credentials.resolve(keyName)
+      const hit = await credentials.resolve(ref)
       if (hit?.value) return hit.value
     } catch {
-      // A key name outside the credential store's grammar falls through to the environment.
+      // A name outside the credential store's grammar falls through to the environment.
     }
   }
-  const fromEnv = process.env[keyName]
+  const fromEnv = process.env[ref]
   return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : undefined
+}
+
+/** Whether a value is a config document rather than an array or class instance. */
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Unwrap a schemastery value wrapper, leaving plain JSON untouched. */
+function plainValue(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value.get === 'function') {
+    try {
+      return value.get()
+    } catch {
+      return undefined
+    }
+  }
+  return value
+}
+
+/** Deep-merge an override layer onto an inherited one; arrays and scalars replace. */
+function mergeLayer(base, override) {
+  if (override === undefined) return base
+  if (!isPlainObject(base) || !isPlainObject(override)) return override
+  const next = { ...base }
+  for (const [key, value] of Object.entries(override)) next[key] = mergeLayer(base[key], value)
+  return next
+}
+
+/**
+ * Read the effective config of every profile entry, from the cheapest source that has it:
+ * the Settings forms, the configuration editor, then the loader's resolved fibre config.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {Map<string, object>}
+ */
+function readEntryConfigs(ctx) {
+  const configs = new Map()
+  const settings = ctx.get('settings')
+  if (settings !== undefined && typeof settings.describe === 'function') {
+    try {
+      for (const form of settings.describe({ redactSecrets: true })) {
+        const value = plainValue(form?.value)
+        if (typeof form?.ns === 'string' && value !== undefined) configs.set(form.ns, value)
+      }
+    } catch {
+      // A composition without settled forms falls through to the editor and loader.
+    }
+  }
+  const editor = ctx.get('configEditor')
+  if (editor !== undefined && typeof editor.configuration === 'function') {
+    try {
+      for (const row of editor.configuration()) {
+        const id = row?.entry?.options?.id
+        if (typeof id !== 'string' || configs.has(id)) continue
+        const value = mergeLayer(plainValue(row.inherited), plainValue(row.override))
+        if (value !== undefined) configs.set(id, value)
+      }
+    } catch {
+      // fall through to the loader
+    }
+  }
+  const loader = ctx.get('loader')
+  if (loader !== undefined && typeof loader.entries === 'function') {
+    try {
+      for (const entry of loader.entries()) {
+        const id = entry?.options?.id
+        if (typeof id !== 'string' || configs.has(id)) continue
+        const value = plainValue(entry.fiber?.effectiveConfig) ?? entry.options?.config
+        if (value !== undefined) configs.set(id, value)
+      }
+    } catch {
+      // nothing left to read
+    }
+  }
+  return configs
+}
+
+/** Follow a directory settings path, e.g. `['providers', 'kilimall']`. */
+function walkPath(root, path) {
+  let node = root
+  for (const segment of path ?? []) {
+    if (!isPlainObject(node)) return undefined
+    node = node[segment]
+  }
+  return node
+}
+
+/**
+ * Describe every provider route the composition knows about, with the config profile that
+ * carries its endpoint, credential reference, and models.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @returns {Array<{provider: string, displayName: string, profile: object, defaultBaseURL?: string}>}
+ */
+function collectRoutes(ctx) {
+  const configs = readEntryConfigs(ctx)
+  const routes = []
+  const llm = ctx.get('llm')
+  let directory = []
+  if (llm !== undefined && typeof llm.listConfigurableProviders === 'function') {
+    try {
+      directory = llm.listConfigurableProviders() ?? []
+    } catch {
+      directory = []
+    }
+  }
+  for (const entry of directory) {
+    const profile = walkPath(configs.get(entry.settingsNs), entry.settingsPath)
+    if (!isPlainObject(profile)) continue
+    // Native single-provider adapters keep no route profile here; only a configured,
+    // OpenAI-shaped profile can advertise an image model the Models page can repair.
+    if (!Array.isArray(profile.models)) continue
+    if (entry.settingsPath.length === 0 && typeof profile.api !== 'string') continue
+    routes.push({
+      provider: entry.provider,
+      displayName: entry.displayName ?? entry.provider,
+      profile,
+      ...(entry.defaultBaseURL === undefined ? {} : { defaultBaseURL: entry.defaultBaseURL }),
+    })
+  }
+  if (routes.length > 0) return routes
+
+  // A composition without the configurable-provider directory still carries the profiles.
+  const providers = configs.get('llm-pi-ai')?.providers
+  if (!isPlainObject(providers)) return routes
+  for (const [provider, profile] of Object.entries(providers)) {
+    if (isPlainObject(profile) && Array.isArray(profile.models)) routes.push({ provider, displayName: provider, profile })
+  }
+  return routes
+}
+
+/** Turn `gpt-image*` style globs into anchored, case-insensitive patterns. */
+function compileImagePatterns(extra) {
+  const globs = [...IMAGE_MODEL_PATTERNS, ...(Array.isArray(extra) ? extra : [])]
+  return globs
+    .filter((glob) => typeof glob === 'string' && glob.length > 0)
+    .map((glob) => new RegExp(`^${glob.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 'i'))
+}
+
+/** Whether a model id names an image model. */
+function isImageModel(id, patterns) {
+  return typeof id === 'string' && id.length > 0 && patterns.some((pattern) => pattern.test(id))
+}
+
+/** Whether a route carries the endpoint and credential facts image calls need. */
+function isImageRoute(route, patterns) {
+  const api = route.profile.api
+  if (typeof api === 'string' && !SUPPORTED_PROTOCOLS.has(api)) return false
+  const models = Array.isArray(route.profile.models) ? route.profile.models : []
+  return models.some((model) => isImageModel(model?.id, patterns))
+}
+
+/** Compare two `gpt-image-<version>` ids numerically. */
+function compareModelVersion(left, right) {
+  const parse = (id) => id.toLowerCase().match(/^gpt-image-(\d+)(?:\.(\d+))?/).slice(1, 3).map((part) => Number(part ?? 0))
+  const a = parse(left)
+  const b = parse(right)
+  return a[0] - b[0] || a[1] - b[1]
+}
+
+/** Pick the model a call should default to for this route. */
+function pickImageModel(models, patterns) {
+  const ids = (Array.isArray(models) ? models : []).map((model) => model?.id).filter((id) => isImageModel(id, patterns))
+  if (ids.includes(PREFERRED_MODEL)) return PREFERRED_MODEL
+  const versioned = ids.filter((id) => /^gpt-image-/i.test(id)).sort(compareModelVersion)
+  if (versioned.length > 0) return versioned[versioned.length - 1]
+  return ids[0]
+}
+
+/** The provider route the session's own model selection points at, when it is knowable. */
+function preferredProvider(ctx, exec) {
+  const current = exec?.agent?.model?.current?.()
+  if (typeof current?.provider === 'string' && current.provider.length > 0) return current.provider
+  const header = exec?.agent?.session?.requestHeader?.()?.config
+  if (typeof header?.provider === 'string' && header.provider.length > 0) return header.provider
+  const selection = ctx.get('agentDefaultModel')
+  if (selection !== undefined && typeof selection.currentSelection === 'function') {
+    try {
+      const fallback = selection.currentSelection()
+      if (typeof fallback?.provider === 'string' && fallback.provider.length > 0) return fallback.provider
+    } catch {
+      // fall through to the config document
+    }
+  }
+  const provider = readEntryConfigs(ctx).get('agent-default-model')?.provider
+  return typeof provider === 'string' && provider.length > 0 ? provider : undefined
+}
+
+/** The credential reference a route resolves its key from. */
+function keyRefOf(route) {
+  const declared = route.profile.apiKeyEnv
+  return typeof declared === 'string' && declared.length > 0 ? declared : `${route.provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+}
+
+/** The endpoint a route's image calls go to. */
+function baseURLOf(route) {
+  const declared = route.profile.baseURL
+  return typeof declared === 'string' && declared.length > 0 ? declared : route.defaultBaseURL
+}
+
+/** The error shown when this machine has no model provider at all. */
+function noProviderError() {
+  return [
+    '画不了：这台机器上还没有配置模型供应商。',
+    '打开 设置 → 模型 → 添加模型提供商，填好 API 地址和密钥，然后重启 DSH 再画一次。',
+    '',
+    '[agent] 配置已存在却仍报此错时，重载插件后重试：plugin_manager set_plugin include:tool-gpt-image enabled:false → enabled:true。',
+  ].join('\n')
+}
+
+/** The error shown when providers exist but none advertises an image model. */
+function noImageModelError(routes) {
+  const names = routes.slice(0, 3).map((route) => `「${route.displayName}」`).join('、')
+  const first = routes[0]
+  return [
+    `画不了：${names} 里没有图像模型。`,
+    `打开 设置 → 模型 → 点「${first.displayName}」那行的编辑 → 获取可用模型 → 勾上 ${PREFERRED_MODEL} → 保存 → 重启 DSH。`,
+    '',
+    `[agent] 该供应商的模型清单里没有命中 ${IMAGE_MODEL_PATTERNS.join(' / ')} 的 id。`,
+  ].join('\n')
+}
+
+/** The error shown when the matching provider has no stored key. */
+function noKeyError(routes, preferred) {
+  const route = routes.find((candidate) => candidate.provider === preferred) ?? routes[0]
+  return [
+    `画不了：「${route.displayName}」的密钥还没填。`,
+    `打开 设置 → 模型 → 点「${route.displayName}」那行的编辑 → 填 API 密钥（和聊天用的是同一把）→ 保存。`,
+    '',
+    `[agent] 缺的凭据引用是 ${keyRefOf(route)}。`,
+  ].join('\n')
+}
+
+/**
+ * Find the provider route an image call should use: the session's own provider when it
+ * advertises an image model, then any other image-capable route, then the OpenAI default
+ * when its key is configured.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {RegExp[]} patterns
+ * @param {{routes?: object[], candidates?: object[]}} state - per-mount scan cache
+ * @param {object} [exec] - the tool execution context, for the session's provider
+ * @returns {Promise<{provider: string, displayName: string, baseURL: string, apiKey: string, apiKeyRef: string, model: string}>}
+ */
+async function resolveTarget(ctx, patterns, state, exec) {
+  const scan = () => {
+    state.routes = collectRoutes(ctx)
+    state.candidates = state.routes.filter((route) => isImageRoute(route, patterns))
+  }
+  if (state.candidates === undefined) scan()
+  // A composition that was still settling at load gets one rescan on the first call.
+  if (state.candidates.length === 0) scan()
+
+  if (state.candidates.length === 0) {
+    const fallbackKey = await resolveCredential(ctx, DEFAULT_API_KEY_ENV)
+    if (fallbackKey !== undefined) {
+      return {
+        provider: 'openai',
+        displayName: 'OpenAI',
+        baseURL: DEFAULT_BASE_URL,
+        apiKey: fallbackKey,
+        apiKeyRef: DEFAULT_API_KEY_ENV,
+        model: DEFAULT_MODEL,
+      }
+    }
+    throw new Error(state.routes.length > 0 ? noImageModelError(state.routes) : noProviderError())
+  }
+
+  const preferred = preferredProvider(ctx, exec)
+  const ordered = preferred === undefined
+    ? state.candidates
+    : [...state.candidates].sort((left, right) => Number(left.provider !== preferred) - Number(right.provider !== preferred))
+  for (const route of ordered) {
+    const apiKeyRef = keyRefOf(route)
+    const apiKey = await resolveCredential(ctx, apiKeyRef)
+    const baseURL = baseURLOf(route)
+    if (apiKey === undefined || typeof baseURL !== 'string' || baseURL.length === 0) continue
+    return { provider: route.provider, displayName: route.displayName, baseURL, apiKey, apiKeyRef, model: pickImageModel(route.profile.models, patterns) }
+  }
+  throw new Error(noKeyError(ordered, preferred))
 }
 
 /**
@@ -362,14 +650,17 @@ function renderImages(verb, value) {
  * @param {object} config - deployment configuration.
  */
 function registerTools(ctx, config) {
-  const baseURL = config?.baseURL ?? DEFAULT_BASE_URL
-  const apiKeyName = config?.apiKeyEnv ?? DEFAULT_API_KEY_ENV
-  const defaultModel = config?.defaultModel ?? DEFAULT_MODEL
-  const editModel = config?.defaultEditModel ?? defaultModel
-  const models = Array.isArray(config?.models) && config.models.length > 0 ? config.models : [defaultModel]
+  const patterns = compileImagePatterns(config?.imageModelPatterns)
   const outputDir = config?.outputDir ?? 'images'
   const timeoutMs = config?.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const modelHint = `Default model: ${defaultModel}. Configured models: ${models.join(', ')}.`
+  const scan = { routes: undefined, candidates: undefined }
+  try {
+    resolveTarget(ctx, patterns, scan).catch(() => {})
+  } catch {
+    // A composition still settling at load is rescanned on the first call.
+  }
+  const modelHint = 'The image provider, endpoint, key, and image model come from the model provider the user '
+    + 'already configured in Settings; pass `model` only to override the discovered model.'
 
   /** Shared argument normalization. */
   const normalize = (args) => {
@@ -402,12 +693,9 @@ function registerTools(ctx, config) {
     async execute(args, exec) {
       const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : ''
       if (prompt.length === 0) throw new Error('prompt must be a non-empty string')
-      const { model = defaultModel, count, format, mediaType, extension } = normalize(args)
-
-      const apiKey = await resolveApiKey(ctx, apiKeyName)
-      if (apiKey === undefined) {
-        throw new Error(`no image API key: set the "${apiKeyName}" credential (the Models page writes it) or export it in the environment`)
-      }
+      const { model: requestedModel, count, format, mediaType, extension } = normalize(args)
+      const target = await resolveTarget(ctx, patterns, scan, exec)
+      const model = requestedModel ?? target.model
 
       const body = { model, prompt, n: count }
       for (const field of ['size', 'quality', 'background']) {
@@ -415,7 +703,7 @@ function registerTools(ctx, config) {
       }
       if (format !== 'png') body.output_format = format
 
-      const { items } = await postImages({ baseURL, apiKey, pathName: '/images/generations', body, signal: exec.signal, timeoutMs })
+      const { items } = await postImages({ baseURL: target.baseURL, apiKey: target.apiKey, pathName: '/images/generations', body, signal: exec.signal, timeoutMs })
       const root = await resolveRoot(ctx, exec)
       const stamp = timestamp()
       const images = await persistImages({
@@ -453,11 +741,9 @@ function registerTools(ctx, config) {
       if (typeof args.image !== 'string' || args.image.trim().length === 0) throw new Error('image must be a non-empty path')
       if (typeof FormData === 'undefined') throw new Error('image_edit needs a runtime with FormData (Node 18+)')
 
-      const { model = editModel, count, format, mediaType, extension } = normalize(args)
-      const apiKey = await resolveApiKey(ctx, apiKeyName)
-      if (apiKey === undefined) {
-        throw new Error(`no image API key: set the "${apiKeyName}" credential (the Models page writes it) or export it in the environment`)
-      }
+      const { model: requestedModel, count, format, mediaType, extension } = normalize(args)
+      const target = await resolveTarget(ctx, patterns, scan, exec)
+      const model = requestedModel ?? target.model
 
       const root = await resolveRoot(ctx, exec)
       const source = resolveInputPath(args.image.trim(), root)
@@ -478,7 +764,7 @@ function registerTools(ctx, config) {
       }
       if (format !== 'png') form.append('output_format', format)
 
-      const { items } = await postImages({ baseURL, apiKey, pathName: '/images/edits', body: form, signal: exec.signal, timeoutMs })
+      const { items } = await postImages({ baseURL: target.baseURL, apiKey: target.apiKey, pathName: '/images/edits', body: form, signal: exec.signal, timeoutMs })
       const stamp = timestamp()
       const images = await persistImages({
         ctx,
