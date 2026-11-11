@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-gpt-image",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Image generation tool for DeepSeek Harness: calls an OpenAI-compatible /v1/images/generations endpoint and returns real image blocks.",
   "type": "module",
   "main": "index.js",
