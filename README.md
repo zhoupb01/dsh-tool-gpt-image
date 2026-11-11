@@ -1,3 +1,6 @@
+[![npm](https://img.shields.io/npm/v/dsh-tool-gpt-image.svg)](https://www.npmjs.com/package/dsh-tool-gpt-image)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 # dsh-tool-gpt-image
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 加两个真正可用的图像工具：
@@ -134,8 +137,13 @@ ComfyUI、sd-webui 等非 OpenAI 形状的端点需要改请求拼装。
 
 ## 安装 / 更新 / 卸载
 
+已发布到 npm，别人直接装就行：
+
 ```bash
-# 安装（在 DSH 的 plugin_manager 里，或让 agent 执行）
+# 从 npm 安装（推荐给使用者）
+plugin_manager install_bundle  dsh-tool-gpt-image@0.2.0
+
+# 本地开发：软链自己的源码，改完 toggle 插件条目生效
 plugin_manager install_bundle  link:/abs/path/to/dsh-tool-gpt-image
 ```
 
