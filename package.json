@@ -1,6 +1,9 @@
 {
   "name": "dsh-tool-gpt-image",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "description": "Zero-config image generation tools for DeepSeek Harness: discovers the model provider the user already configured and returns real image blocks.",
   "type": "module",
   "main": "index.js",
@@ -13,6 +16,7 @@
     "index.js",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "docs/preview.jpg"
   ],

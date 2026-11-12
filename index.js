@@ -326,10 +326,15 @@ function isImageModel(id, patterns) {
   return typeof id === 'string' && id.length > 0 && patterns.some((pattern) => pattern.test(id))
 }
 
-/** Whether a route carries the endpoint and credential facts image calls need. */
-function isImageRoute(route, patterns) {
+/** Explicit image requests can use an OpenAI route even when its chat catalog omits image models. */
+function supportsImageProtocol(route) {
   const api = route.profile.api
-  if (typeof api === 'string' && !SUPPORTED_PROTOCOLS.has(api)) return false
+  return typeof api !== 'string' || SUPPORTED_PROTOCOLS.has(api)
+}
+
+/** Whether a route advertises an image model for automatic discovery. */
+function isImageRoute(route, patterns) {
+  if (!supportsImageProtocol(route)) return false
   const models = Array.isArray(route.profile.models) ? route.profile.models : []
   return models.some((model) => isImageModel(model?.id, patterns))
 }
@@ -397,8 +402,9 @@ function noImageModelError(routes) {
   const names = routes.slice(0, 3).map((route) => `「${route.displayName}」`).join('、')
   const first = routes[0]
   return [
-    `画不了：${names} 里没有图像模型。`,
-    `打开 设置 → 模型 → 点「${first.displayName}」那行的编辑 → 获取可用模型 → 勾上 ${PREFERRED_MODEL} → 保存 → 重启 DSH。`,
+    `无法自动选择图像模型：${names} 的聊天模型清单没有列出图像模型。`,
+    `Magpie 的图像模型是单独配置的；确认已在图像模型标签启用后，调用图片工具时显式传 model: "${PREFERRED_MODEL}"。`,
+    `其他供应商可在 设置 → 模型 →「${first.displayName}」中核对支持的模型；这条提示不代表供应商不支持生图。`,
     '',
     `[agent] 该供应商的模型清单里没有命中 ${IMAGE_MODEL_PATTERNS.join(' / ')} 的 id。`,
   ].join('\n')
@@ -423,18 +429,23 @@ function noKeyError(routes, preferred) {
  * @param {RegExp[]} patterns
  * @param {{routes?: object[], candidates?: object[]}} state - per-mount scan cache
  * @param {object} [exec] - the tool execution context, for the session's provider
+ * @param {string} [requestedModel] - explicit image id, independent of the chat catalog
  * @returns {Promise<{provider: string, displayName: string, baseURL: string, apiKey: string, apiKeyRef: string, model: string}>}
  */
-async function resolveTarget(ctx, patterns, state, exec) {
+async function resolveTarget(ctx, patterns, state, exec, requestedModel) {
   const scan = () => {
     state.routes = collectRoutes(ctx)
     state.candidates = state.routes.filter((route) => isImageRoute(route, patterns))
   }
-  if (state.candidates === undefined) scan()
+  if (state.candidates === undefined || requestedModel !== undefined) scan()
   // A composition that was still settling at load gets one rescan on the first call.
   if (state.candidates.length === 0) scan()
 
-  if (state.candidates.length === 0) {
+  const candidates = requestedModel === undefined
+    ? state.candidates
+    : state.routes.filter(supportsImageProtocol)
+
+  if (candidates.length === 0) {
     const fallbackKey = await resolveCredential(ctx, DEFAULT_API_KEY_ENV)
     if (fallbackKey !== undefined) {
       return {
@@ -443,7 +454,7 @@ async function resolveTarget(ctx, patterns, state, exec) {
         baseURL: DEFAULT_BASE_URL,
         apiKey: fallbackKey,
         apiKeyRef: DEFAULT_API_KEY_ENV,
-        model: DEFAULT_MODEL,
+        model: requestedModel ?? DEFAULT_MODEL,
       }
     }
     throw new Error(state.routes.length > 0 ? noImageModelError(state.routes) : noProviderError())
@@ -451,14 +462,14 @@ async function resolveTarget(ctx, patterns, state, exec) {
 
   const preferred = preferredProvider(ctx, exec)
   const ordered = preferred === undefined
-    ? state.candidates
-    : [...state.candidates].sort((left, right) => Number(left.provider !== preferred) - Number(right.provider !== preferred))
+    ? candidates
+    : [...candidates].sort((left, right) => Number(left.provider !== preferred) - Number(right.provider !== preferred))
   for (const route of ordered) {
     const apiKeyRef = keyRefOf(route)
     const apiKey = await resolveCredential(ctx, apiKeyRef)
     const baseURL = baseURLOf(route)
     if (apiKey === undefined || typeof baseURL !== 'string' || baseURL.length === 0) continue
-    return { provider: route.provider, displayName: route.displayName, baseURL, apiKey, apiKeyRef, model: pickImageModel(route.profile.models, patterns) }
+    return { provider: route.provider, displayName: route.displayName, baseURL, apiKey, apiKeyRef, model: requestedModel ?? pickImageModel(route.profile.models, patterns) }
   }
   throw new Error(noKeyError(ordered, preferred))
 }
@@ -694,7 +705,7 @@ function registerTools(ctx, config) {
       const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : ''
       if (prompt.length === 0) throw new Error('prompt must be a non-empty string')
       const { model: requestedModel, count, format, mediaType, extension } = normalize(args)
-      const target = await resolveTarget(ctx, patterns, scan, exec)
+      const target = await resolveTarget(ctx, patterns, scan, exec, requestedModel)
       const model = requestedModel ?? target.model
 
       const body = { model, prompt, n: count }
@@ -742,7 +753,7 @@ function registerTools(ctx, config) {
       if (typeof FormData === 'undefined') throw new Error('image_edit needs a runtime with FormData (Node 18+)')
 
       const { model: requestedModel, count, format, mediaType, extension } = normalize(args)
-      const target = await resolveTarget(ctx, patterns, scan, exec)
+      const target = await resolveTarget(ctx, patterns, scan, exec, requestedModel)
       const model = requestedModel ?? target.model
 
       const root = await resolveRoot(ctx, exec)

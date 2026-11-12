@@ -9,6 +9,8 @@
 **装完就能用，不需要写任何配置。** 插件会读你已经在 **设置 → 模型** 里配好的供应商，
 挑出带图像模型的那个，直接复用它的接口地址、密钥和模型。
 
+Magpie 将图像模型放在独立标签中时，调用工具请显式传 `model: "gpt-image-2"`；插件会使用现有兼容供应商，不要求该模型出现在聊天模型清单中。
+
 它们调用 OpenAI 兼容的 `POST {baseURL}/images/generations`（JSON）和
 `POST {baseURL}/images/edits`（multipart），把返回的 `b64_json`（或 `url`）解码后
 **存入 DSH 的附件存储**——所以在 Web GUI 里会直接渲染成图片，不只是给一个路径；
@@ -28,15 +30,16 @@
 1. 问 `ctx.llm.listConfigurableProviders()` 要到所有供应商的配置地址，
    再经 `ctx.settings.describe()`（或 `ctx.configEditor` / `ctx.loader` 兜底）读出每个
    供应商的 `baseURL`、`api`、`apiKeyEnv`、`models`。
-2. 只保留 `api` 是 `openai-completions` 或 `openai-responses`、且模型清单里命中
-   图像模型白名单（`gpt-image*` / `dall-e*` / `imagen*` / `flux*` / `seedream*` / `qwen-image*`）的供应商。
+2. 自动发现时，只保留 `api` 是 `openai-completions` 或 `openai-responses`、且模型清单命中图像模型白名单的供应商。
+   **显式传入 `model` 时，直接选择已有的协议兼容供应商**，无需该模型出现在聊天模型清单里。
+   Magpie 的图像模型标签与聊天模型分开；在那里启用后，调用时传 `model: "gpt-image-2"` 即可。
 3. 优先选**当前会话默认模型所属的供应商**，没有就按配置顺序取第一个能用的。
 4. 密钥：先按供应商的 `apiKeyEnv` 解析，没写就按模型页的约定 `<供应商ID大写>_API_KEY`；
    先查 DSH 凭据库，再查进程环境变量。
 5. 模型：优先 `gpt-image-2`，其次版本号最大的 `gpt-image-*`，再其次白名单里第一个。
 6. 一个都用不了、但机器上有 `OPENAI_API_KEY` 时，回落到 `api.openai.com` + `gpt-image-1`。
 
-发现结果缓存在插件实例里：改完供应商配置后，重载插件条目（或重启 DSH）即可重新发现。
+自动发现结果缓存在插件实例里；显式传 `model` 的调用每次重读供应商配置。自动模式改完配置后可重载插件条目重新发现。
 
 ## 装了什么
 
@@ -50,7 +53,7 @@
 
 ```bash
 # 从 npm 安装（推荐给使用者）
-plugin_manager install_bundle  dsh-tool-gpt-image@0.3.0
+plugin_manager install_bundle  dsh-tool-gpt-image@0.3.1
 
 # 本地开发：软链自己的源码，改完 toggle 插件条目生效
 plugin_manager install_bundle  link:/abs/path/to/dsh-tool-gpt-image
@@ -150,7 +153,7 @@ plugin_manager set_plugin include:tool-gpt-image enabled:true
 | 现象 | 含义 | 怎么办 |
 | --- | --- | --- |
 | 「这台机器上还没有配置模型供应商」 | 一个 provider 都没有 | 设置 → 模型 → 添加模型提供商，填地址和密钥，重启 DSH |
-| 「…里没有图像模型」 | provider 的模型清单没勾图像模型 | 模型页点该行编辑 → 获取可用模型 → 勾 `gpt-image-2` → 保存 → 重启 |
+| 「无法自动选择图像模型…」 | 聊天模型清单未列出图像模型，不能据此判断供应商不支持生图 | Magpie：保留独立图像模型标签，工具调用显式传 `model: "gpt-image-2"` |
 | 「…的密钥还没填」 | provider 有图像模型但没存 key | 模型页点该行编辑 → 填 API 密钥（和聊天同一把） |
 | `image generation failed: HTTP 404` | baseURL 不对或该服务没有 `/images/*` | 检查地址是否到 `/v1` 为止 |
 | `HTTP 401` | key 无效 | 重新填 key |
@@ -167,4 +170,14 @@ plugin_manager set_plugin include:tool-gpt-image enabled:true
   （要 1024×1024、给 1254×1254 源图，回来还是 1254×1254）。要精确尺寸就在返回后自己缩放。
 - `n > 1` 且同时给了 `save_to` 时，文件名自动加 `-1`、`-2` 后缀。
 - 工具在调用它的那条模型路由不具备图像输入能力时仍能执行，但模型本身看不到图（GUI 里能看到）。
-- 供应商配置改动不会自动重新发现；重载插件条目或重启 DSH 后生效。
+- 自动发现模式缓存供应商清单；重载插件条目后刷新。显式指定 `model` 时会重新读取供应商配置。
+
+## 回归验证
+
+在 Git 仓库中执行（测试文件不包含在 npm 安装包内）：
+
+```bash
+npm test
+```
+
+测试通过真实工具注册与执行入口覆盖聊天清单不含图像模型时的生成、编辑、供应商选择及旧式自动发现；请求使用内存假响应，不调用真实供应商。
